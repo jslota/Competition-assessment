@@ -1,0 +1,191 @@
+---
+title: "Competition # 43680 Assessment - Slota, Jessy"
+output:
+  pdf_document: default
+---
+
+## Pre-processing dataset
+
+This RMarkdown file shows code for the written assessment for Competition # 43680.
+
+First, the relevant R packages were loaded into R using the library() function. 
+
+```{r}
+#load r packages
+library(dplyr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(emmeans)
+```
+
+## Dataset pre-processing
+
+Next, the Building permit inspection dataset was loaded into R, along with a file containing additional meta-data
+for the building permit dataset.
+
+The building permit dataset was rather large, so to speed up computation for this exercise, the dataset was filtered
+to match a subset of the building inspection meta-data file (for which only 1000 entries were downloaded).
+
+dplyr::left_join was then used to merge the permit inspection dataset with the relevant meta-data columns.
+
+```{r}
+# load and clean dataset
+dt_inspect <- read.csv("Building_and_Safety_Inspections_20250505.csv") # Load inspection dataset
+dt_meta <- read.csv("xnhu-aczu.csv")  # Load dataset with additional information
+
+permit_list <- gsub("-", " ",
+                    dt_meta$pcis_permit) # Get list of permits with meta data
+dt_inspect <- dt_inspect %>% 
+  filter(PERMIT %in% permit_list) # filter based on permit list
+
+dt_meta$PERMIT <- gsub("-", " ",
+                       dt_meta$pcis_permit)
+
+dt_inspect <- dt_inspect %>% # Add meta-data to inspection dataset
+  left_join(dt_meta %>% # Use left-join to merge datasets
+              select(PERMIT, street_name, 
+                     contractors_business_name, 
+                     contractor_city, census_tract),
+            by = "PERMIT")
+```
+
+## Question 1 - show an interesting characteristic
+
+To initially examine the dataset, a simple bar plot was used to
+visualize the common entries for 'Permit.Status' in the dataset.
+
+Most permits had a status of "Issued"
+
+
+```{r}
+### Part 1 - show an interesting characteristic
+
+pstatus.tab <- dt_inspect %>%  # make table counting permits by status
+  group_by(Permit.Status) %>%
+  count() %>%
+  filter(n > 10) %>% # only show values with greater than 10 entries
+  arrange(n)
+ # set permit status as factor so plot is arranged by n
+pstatus.tab$Permit.Status <- factor(pstatus.tab$Permit.Status,
+                                    levels = pstatus.tab$Permit.Status)
+
+pstatus.tab # display table
+
+ggplot(pstatus.tab, aes(x=n, y=Permit.Status)) + # make plot of permit status
+  geom_bar(stat = "identity") +
+  theme_classic()
+```
+
+Similarly, a simple bar plot was used to visualize common entries
+for 'Inspection.Result' in the dataset.
+
+Most permits recieved a result of "Approved".
+
+```{r}
+result.tab <- dt_inspect %>%  # make table counting permits by status
+  group_by(Inspection.Result) %>%
+  count() %>%
+  filter(n > 100) %>% # only show values with greater than 100 entries
+  arrange(n)
+#Set Inspection Result as a factor
+result.tab$Inspection.Result <- factor(result.tab$Inspection.Result,
+                                       levels = result.tab$Inspection.Result)
+
+ggplot(result.tab, aes(x=n, y=Inspection.Result)) + # make plot of permit status
+  geom_bar(stat = "identity") +
+  theme_classic()
+
+```
+
+## Question 2 - inspections by geography
+
+To examine inspections by geography, inspections were grouped by the 'census_tract'
+meta-data variable. A bar plot was used to visualize the top 20 census tracts by
+number of inspections. 
+
+The top census tract was '2774'.
+
+```{r}
+### Part 2 - investigate geography
+
+# N inspections by geography
+
+census.tab <- dt_inspect %>%
+  group_by(census_tract) %>%
+  count() %>%
+  arrange(n)
+census.tab$census_tract <- factor(census.tab$census_tract, levels = census.tab$census_tract)
+
+# 20 Most common census tracts
+common_census <- census.tab[c(326:346),]$census_tract
+
+census.tab[c(326:346),] # Print table
+
+ggplot(census.tab[c(326:346),], aes(x=n, y=census_tract)) + # make plot of permit status
+  geom_bar(stat = "identity") +
+  theme_classic()
+
+```
+
+To examine inspection results across geographies, 'Inspection.Result' was counted
+by census tract for the top 20 census tracts. Counts were converted to proportions
+for each census tract and visualized as a heatmap.
+
+Most census tracts had a high proportion of approved inspections. Some of the census 
+tracts had a high proportion of "Partial Approval", "Inspection Scheduled", or
+"Conditional Approval" entries. It is tempting to speculate that these represent areas
+with a high rate of building development.
+
+```{r}
+# N inspections by geography by result
+
+mat <- dt_inspect %>%
+  filter(census_tract %in% common_census) %>%
+  group_by(Inspection.Result, census_tract) %>%
+  count() %>%
+  reshape2::acast(Inspection.Result ~ census_tract,value.var = "n", fill = 0) %>%
+  t()
+
+mat <- mat/rowSums(mat)
+
+mat # Print matrix
+
+Heatmap(mat, name = "proportion")
+
+```
+
+## Question 3 - Modelling inspecion violations by contractor's place of origin
+
+The following inspection results were considered to represent violations:
+"No Access for Inspection", "Corrections Issued", "Not Ready for Inspection", "Order to Comply Issued".
+A binary (0 or 1) "violation" column was made based on whether inspection.result contained the 
+above entries.
+
+Contractor location and the binary "violation" variable were fit to a logistic regression model, with
+the results formatted as a data frame and arranged by P-value.
+
+A few cities had p-value < 0.05, indicating that they were significantly associated with inspection
+violations (either higher or lower violation rates compared to the average). Some distant cities, 
+like Boston and St Louis, had significantly higher rates of violation according to the logistic regression 
+model. Thus, the managers hypothesis of 'out of town' contractors not being as invested in project 
+success is plausible.
+
+```{r}
+### Part 3 - model contractor location
+
+# Make dataset of violations by contractor location
+dt_violate <- dt_inspect %>%
+  filter(contractor_city != "") %>%
+  mutate(violation = case_when(Inspection.Result %in% c("No Access for Inspection", "Corrections Issued",
+                                                        "Not Ready for Inspection", "Order to Comply Issued") ~ 1,
+                               .default = 0)) %>% # binarize inspection result - 1 for violation
+  select(contractor_city, violation)
+
+# Fit logistic regression model
+logit_model <- glm(violation ~ contractor_city, # fit binarized inspection violation data to logistic regression model
+                   family = binomial(link = "logit"), data = dt_violate)
+res <- summary(logit_model)
+res <- res$coefficients %>% as.data.frame() %>% arrange(`Pr(>|z|)`)
+res
+```
+
